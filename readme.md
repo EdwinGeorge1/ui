@@ -20,6 +20,8 @@ This is a React-based frontend application for controlling and monitoring a mobi
     ```bash
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
     sudo apt install -y nodejs
+    npm install roslib ros3d three
+
     ```
     Verify installation:
     ```bash
@@ -72,6 +74,8 @@ This folder contains the backend server for the mobile robot project, built with
 
 - Python 3.8 or higher
 - pip (Python package manager)
+pip install "uvicorn[standard]" websockets wsproto numpy transforms3d
+
 
 ### Setup Instructions
 
