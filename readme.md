@@ -100,7 +100,7 @@ mobile-robot-frontend/
 <img src="docs/pic.png" alt="UI Image" width="50%" />
 
 # Gif
-<img src ="docs/ui.gif"  alt="GIF"      width="50%" />
+<img src="docs/ui.gif" alt="Mobile Robot Interface Demo" width="50%" />
 
 ### Development
 
