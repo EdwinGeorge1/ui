@@ -1,4 +1,4 @@
-# main.py
+# main.py (updated for camera feed)
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,13 +6,14 @@ from datetime import datetime
 import asyncio
 import math
 import uvicorn
+import base64
 
 # --- ROS 2 imports ---
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped, PointStamped
 from nav_msgs.msg import Odometry, Path, OccupancyGrid
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, CompressedImage
 from visualization_msgs.msg import MarkerArray
 from tf_transformations import euler_from_quaternion
 
@@ -20,7 +21,6 @@ from tf_transformations import euler_from_quaternion
 # FastAPI setup
 # -------------------------------
 app = FastAPI(title="Mobile Robot Backend")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,7 +56,8 @@ robot_state = {
     "smoothed_path": [],
     "waypoints": [],
     "markers": [],
-    "local_costmap": None
+    "local_costmap": None,
+    "camera_image": None  # NEW: store latest camera frame
 }
 
 logs = []
@@ -71,7 +72,9 @@ ros_node = Node("fastapi_ros_bridge")
 cmd_vel_pub = ros_node.create_publisher(Twist, "/cmd_vel", 10)
 goal_pub = ros_node.create_publisher(PoseStamped, "/goal_pose", 10)
 
+# -------------------------------
 # Subscribers
+# -------------------------------
 def odom_callback(msg: Odometry):
     robot_state["pose"]["x"] = msg.pose.pose.position.x
     robot_state["pose"]["y"] = msg.pose.pose.position.y
@@ -94,12 +97,13 @@ def scan_callback(msg: LaserScan):
 
 ros_node.create_subscription(LaserScan, "/scan", scan_callback, 10)
 
-def path_callback(msg: Path):
-    points = [{"x": p.pose.position.x, "y": p.pose.position.y} for p in msg.poses]
-    robot_state["path"] = points
+ros_node.create_subscription(Path, "/plan", lambda msg: robot_state.update({
+    "path": [{"x": p.pose.position.x, "y": p.pose.position.y} for p in msg.poses]
+}), 10)
 
-ros_node.create_subscription(Path, "/plan", path_callback, 10)
-ros_node.create_subscription(Path, "/plan_smoothed", lambda msg: robot_state.update({"smoothed_path":[{"x":p.pose.position.x,"y":p.pose.position.y} for p in msg.poses]}), 10)
+ros_node.create_subscription(Path, "/plan_smoothed", lambda msg: robot_state.update({
+    "smoothed_path": [{"x": p.pose.position.x, "y": p.pose.position.y} for p in msg.poses]
+}), 10)
 
 def clicked_point_callback(msg: PointStamped):
     robot_state["waypoints"].append({"x": msg.point.x, "y": msg.point.y})
@@ -129,6 +133,13 @@ def local_costmap_callback(msg: OccupancyGrid):
     }
 
 ros_node.create_subscription(OccupancyGrid, "/local_costmap/costmap", local_costmap_callback, 10)
+
+# --- Camera Subscriber ---
+def camera_callback(msg: CompressedImage):
+    # Convert ROS CompressedImage to base64 string
+    robot_state["camera_image"] = base64.b64encode(msg.data).decode("utf-8")
+
+ros_node.create_subscription(CompressedImage, "/camera/image_raw/compressed", camera_callback, 10)
 
 # -------------------------------
 # Background ROS spin
@@ -199,6 +210,8 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "waypoints", "points": robot_state["waypoints"]})
             await ws.send_json({"type": "markers", "markers": robot_state["markers"]})
             await ws.send_json({"type": "local_costmap", "data": robot_state["local_costmap"]})
+            if robot_state["camera_image"]:
+                await ws.send_json({"type": "camera", "image": robot_state["camera_image"]})
             await asyncio.sleep(0.1)
     except Exception as e:
         print("WebSocket disconnected:", e)
