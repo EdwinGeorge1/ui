@@ -100,8 +100,7 @@ mobile-robot-frontend/
 <img src="docs/pic.png" alt="UI Image" width="50%" />
 
 # Gif
-<img src="docs/ui.gif" alt="Mobile Robot Interface Demo" width="50%" />
-
+![UI Demo](docs/ui.gif)
 ### Development
 
 1. Make changes to the files in the `src` directory
