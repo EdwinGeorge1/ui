@@ -1,21 +1,23 @@
+# main.py
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
-import uvicorn
 import asyncio
 import math
+import uvicorn
 
-# --- ROS 2 Imports ---
+# --- ROS 2 imports ---
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseStamped
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist, PoseStamped, PointStamped
+from nav_msgs.msg import Odometry, Path, OccupancyGrid
 from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import MarkerArray
 from tf_transformations import euler_from_quaternion
 
 # -------------------------------
-# FastAPI Setup
+# FastAPI setup
 # -------------------------------
 app = FastAPI(title="Mobile Robot Backend")
 
@@ -28,7 +30,7 @@ app.add_middleware(
 )
 
 # -------------------------------
-# Data Models
+# Models
 # -------------------------------
 class CmdVel(BaseModel):
     linear: float
@@ -40,7 +42,7 @@ class Goal(BaseModel):
     theta: float = 0.0
 
 # -------------------------------
-# Robot State
+# Robot state
 # -------------------------------
 robot_state = {
     "linear": 0.0,
@@ -49,24 +51,27 @@ robot_state = {
     "mode": "IDLE",
     "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
     "goal": {"x": 0.0, "y": 0.0, "theta": 0.0},
-    "scan_points": []
+    "scan_points": [],
+    "path": [],
+    "smoothed_path": [],
+    "waypoints": [],
+    "markers": [],
+    "local_costmap": None
 }
 
 logs = []
 
 # -------------------------------
-# ROS 2 Node Setup
+# ROS 2 Node
 # -------------------------------
 rclpy.init()
 ros_node = Node("fastapi_ros_bridge")
 
-# Publisher to /cmd_vel
+# Publishers
 cmd_vel_pub = ros_node.create_publisher(Twist, "/cmd_vel", 10)
-
-# Publisher for goal (optional)
 goal_pub = ros_node.create_publisher(PoseStamped, "/goal_pose", 10)
 
-# Subscriber to /odom
+# Subscribers
 def odom_callback(msg: Odometry):
     robot_state["pose"]["x"] = msg.pose.pose.position.x
     robot_state["pose"]["y"] = msg.pose.pose.position.y
@@ -74,9 +79,8 @@ def odom_callback(msg: Odometry):
     _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
     robot_state["pose"]["theta"] = yaw
 
-odom_sub = ros_node.create_subscription(Odometry, "/odom", odom_callback, 10)
+ros_node.create_subscription(Odometry, "/odom", odom_callback, 10)
 
-# Subscriber to /scan (LaserScan)
 def scan_callback(msg: LaserScan):
     points = []
     angle = msg.angle_min
@@ -88,9 +92,47 @@ def scan_callback(msg: LaserScan):
         angle += msg.angle_increment
     robot_state["scan_points"] = points
 
-scan_sub = ros_node.create_subscription(LaserScan, "/scan", scan_callback, 10)
+ros_node.create_subscription(LaserScan, "/scan", scan_callback, 10)
 
+def path_callback(msg: Path):
+    points = [{"x": p.pose.position.x, "y": p.pose.position.y} for p in msg.poses]
+    robot_state["path"] = points
+
+ros_node.create_subscription(Path, "/plan", path_callback, 10)
+ros_node.create_subscription(Path, "/plan_smoothed", lambda msg: robot_state.update({"smoothed_path":[{"x":p.pose.position.x,"y":p.pose.position.y} for p in msg.poses]}), 10)
+
+def clicked_point_callback(msg: PointStamped):
+    robot_state["waypoints"].append({"x": msg.point.x, "y": msg.point.y})
+    if len(robot_state["waypoints"]) > 20:
+        robot_state["waypoints"].pop(0)
+
+ros_node.create_subscription(PointStamped, "/clicked_point", clicked_point_callback, 10)
+
+def marker_callback(msg: MarkerArray):
+    markers = []
+    for m in msg.markers:
+        markers.append({
+            "position": {"x": m.pose.position.x, "y": m.pose.position.y, "z": m.pose.position.z},
+            "color": {"r": m.color.r, "g": m.color.g, "b": m.color.b, "a": m.color.a}
+        })
+    robot_state["markers"] = markers
+
+ros_node.create_subscription(MarkerArray, "/marker", marker_callback, 10)
+
+def local_costmap_callback(msg: OccupancyGrid):
+    robot_state["local_costmap"] = {
+        "width": msg.info.width,
+        "height": msg.info.height,
+        "resolution": msg.info.resolution,
+        "origin": {"x": msg.info.origin.position.x, "y": msg.info.origin.position.y},
+        "data": list(msg.data)
+    }
+
+ros_node.create_subscription(OccupancyGrid, "/local_costmap/costmap", local_costmap_callback, 10)
+
+# -------------------------------
 # Background ROS spin
+# -------------------------------
 async def ros_spin_loop():
     while True:
         rclpy.spin_once(ros_node, timeout_sec=0.1)
@@ -110,7 +152,6 @@ def send_cmd_vel(cmd: CmdVel):
     msg.linear.x = cmd.linear
     msg.angular.z = cmd.angular
     cmd_vel_pub.publish(msg)
-
     robot_state["linear"] = cmd.linear
     robot_state["angular"] = cmd.angular
     robot_state["mode"] = "MOVING" if (cmd.linear or cmd.angular) else "IDLE"
@@ -119,9 +160,7 @@ def send_cmd_vel(cmd: CmdVel):
         "time": datetime.now().strftime("%H:%M:%S"),
         "message": f"CMD_VEL: linear={cmd.linear:.2f}, angular={cmd.angular:.2f}"
     })
-    if len(logs) > 100:
-        logs.pop(0)
-
+    if len(logs) > 100: logs.pop(0)
     return {"status": "ok", "mode": robot_state["mode"]}
 
 @app.get("/status")
@@ -140,43 +179,29 @@ def set_goal(goal: Goal):
     msg.pose.position.x = goal.x
     msg.pose.position.y = goal.y
     msg.pose.position.z = 0.0
-    msg.pose.orientation.x = 0.0
-    msg.pose.orientation.y = 0.0
-    msg.pose.orientation.z = 0.0
     msg.pose.orientation.w = 1.0
     goal_pub.publish(msg)
-
-    logs.append({
-        "time": datetime.now().strftime("%H:%M:%S"),
-        "message": f"Goal set to ({goal.x:.2f}, {goal.y:.2f})"
-    })
+    logs.append({"time": datetime.now().strftime("%H:%M:%S"), "message": f"Goal set to ({goal.x:.2f},{goal.y:.2f})"})
     return {"status": "goal received", "goal": goal}
 
 # -------------------------------
-# WebSocket for live pose + LIDAR
+# WebSocket for live updates
 # -------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            # Send pose
             await ws.send_json({"type": "pose", "pose": robot_state["pose"]})
-
-            # Send laser scan points
-            if robot_state["scan_points"]:
-                await ws.send_json({"type": "scan", "points": robot_state["scan_points"]})
-            else:
-                # fallback simulated LIDAR circle if /scan not yet received
-                points = [
-                    {"x": math.cos(a) * 1.5, "y": math.sin(a) * 1.5}
-                    for a in [i * math.pi / 36 for i in range(72)]
-                ]
-                await ws.send_json({"type": "scan", "points": points})
-
+            await ws.send_json({"type": "scan", "points": robot_state["scan_points"]})
+            await ws.send_json({"type": "path", "points": robot_state["path"]})
+            await ws.send_json({"type": "smoothed_path", "points": robot_state["smoothed_path"]})
+            await ws.send_json({"type": "waypoints", "points": robot_state["waypoints"]})
+            await ws.send_json({"type": "markers", "markers": robot_state["markers"]})
+            await ws.send_json({"type": "local_costmap", "data": robot_state["local_costmap"]})
             await asyncio.sleep(0.1)
     except Exception as e:
-        print("WebSocket disconnected", e)
+        print("WebSocket disconnected:", e)
 
 # -------------------------------
 # Run FastAPI
