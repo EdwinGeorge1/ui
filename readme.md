@@ -55,8 +55,11 @@ mobile-robot-frontend/
      ├── index.js
      └── ...
 ```
-
+# Image
 <img src="docs/pic.png" alt="UI Image" width="50%" />
+
+# Gif
+<img src ="docs/ui.gif"  alt="GIF"      width="50%" />
 
 ### Development
 
